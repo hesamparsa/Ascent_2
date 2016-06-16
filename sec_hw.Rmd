@@ -1,0 +1,458 @@
+---
+title: "sec"
+author: "Hesam Parsa"
+date: "June 4, 2016"
+output: html_document
+---
+
+This is an R Markdown document. Mliarkdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+knitr::opts_chunk$set(eval=FALSE, echo=TRUE)
+```
+
+```{r libraries}
+library(readr)
+library(dplyr) 
+library(ggmap)
+library(stringr)
+library(lubridate)
+library(boot)
+library(caret)
+```
+
+# Intro
+This code is a model to predict the noise complaint based on the following variables
+- Ozone level (ppm)
+- CO level (ppm)
+- 2.5 um small particle 
+
+#Data
+The air pollution data is downloaded from: https://www3.epa.gov/airdata/ad_data_daily.html
+- Ozone level (ppm)
+- CO level (ppm)
+- 2.5 um small particle 
+The residence complaint data is downloaded from: http://www1.nyc.gov/311/
+
+```{r load data }
+setwd("~/Desktop/Bootcamp/sec")
+#install.packages("readr")
+#install.packages("dplyr")
+df <- read_csv("Data_Queens/2015_311.csv")
+df_ozone <- read_csv("Data_Queens/data_queens_oz.csv")
+df_co <- read_csv("Data_Queens/data_queens_co.csv")
+df_pm <- read_csv("Data_Queens/data_queens_pm.csv")
+df_man <- filter(df, Borough == "QUEENS") # You should use dplyr filter 
+```
+
+Here we show the location of the pm sensors in Queens borough
+```{r}
+#install.packages("ggmap")
+map <- get_map(location = "queens", zoom=12, maptype = "roadmap"
+               , source="google", color="color")
+ggmap(map)
+
+ggmap(map)+
+  geom_point( data=df_pm, aes(x=SITE_LONGITUDE, y=SITE_LATITUDE, 
+                                 show_guide=TRUE, size=5),
+              alpha=.5, na.rm= T )
+```
+Here we check if sensor data is unique or not
+```{r}
+unique(df_ozone$SITE_LONGITUDE)
+unique(df_co$SITE_LONGITUDE)
+unique(df_pm$SITE_LONGITUDE)
+```
+
+```{r}
+df_ozone <- select(df_ozone, Date, oz = DAILY_AQI_VALUE)
+df_co <- select(df_co, Date, co = DAILY_AQI_VALUE) 
+df_pm <- select(df_pm , Date, pm = DAILY_AQI_VALUE) 
+```
+Since we have two small particle sensor we calculate the average of these two sensors.
+```{r}
+#?dplyr::select
+df_pm <- df_pm %>%
+  group_by(Date) %>%
+  dplyr:: summarise(pm=mean(pm)) # take average of 2 sensor
+sum(duplicated(df_pm$Date))
+```
+
+```{r}
+df_air <- inner_join(df_ozone, df_co, by = "Date") %>% inner_join(df_pm, by = "Date")
+```
+
+``` {r}
+
+names(df) <- str_replace_all(names(df), pattern = "[^[:alnum:]]", replacement = "_")
+df$Date <- str_extract(df$Created_Date, "[:digit:]+/[:digit:]+/[:digit:]+")
+dft <- inner_join(df,df_air)
+```
+
+```{r}
+#install.packages("lubridate")
+dft$Date <- mdy(dft$Date)
+wday(dft$Date)
+# extract date only
+```
+
+```{r}
+df_wd <- dft %>%
+  select (Date, Complaint_Type, oz, co,pm) %>%
+  filter(str_detect(Complaint_Type, "Noise"))  %>%
+  group_by(Date) %>%
+   dplyr::mutate(N = n(),
+        oz = mean(oz),
+        wd = wday(Date)) %>%
+ dplyr::mutate(day_ = ifelse(wd %in% c(7, 1), "weekend", "workday") )%>%
+ ungroup() %>%
+ select(-wd)
+
+```
+
+```{r}
+#install.packages("caret")
+#install.packages("pbkrtest")
+library(caret)
+set.seed(3456)
+trainIndex <- createDataPartition(df_wd$N, p = .8, list = F)
+head(trainIndex)
+df_wd_train <- df_wd[ trainIndex,]
+df_wd_test  <- df_wd[-trainIndex,]
+```
+
+```{r}
+ggplot(data = df_wd_train, aes(y = N, x = day_, fill = day_)) +
+ geom_boxplot()
+
+# here you can do T-test to see if there is a real difference etc.
+
+df1_t <- df_wd_train %>% 
+ filter(day_ == "weekend") %>%
+ select(N) %>%
+ na.omit()
+
+df2_t <- df_wd_train %>% 
+ filter(day_ == "workday")  %>%
+ select(N) %>%
+ na.omit() 
+  
+t.test(x = df1_t$N, y = df2_t$N)
+```
+
+#### Let us now do exploration. Adding air quality
+
+```{r}
+# how about additng Ozone?
+ggplot(data = df_wd_train, aes(y = N, x = oz, color = day_)) +
+  geom_point() + stat_smooth(method = "lm")
+
+#how about Carbon Oxide? 
+ggplot(data = df_wd_train, aes(y = N, x = co, color = day_)) +
+  geom_point() + stat_smooth(method = "lm")
+
+# how about PM?
+ggplot(data = df_wd_train, aes(y = N, x = pm, color = day_)) +
+  geom_point() + stat_smooth(method = "lm")
+```
+
+```{r}
+FitLm <- lm(data = df_wd_train, N ~ oz)
+FitLm
+# how big is st.d coefficiencts? How big is a p-value
+summary(FitLm)
+```
+
+```{r}
+FitLm <- lm(data = df_wd_train, N ~ co)
+FitLm
+# how big is st.d coefficiencts? How big is a p-value
+summary(FitLm)
+```
+
+```{r}
+FitLm2 <- lm(data = df_wd_train, N ~ oz + co)
+FitLm2
+# how big is st.d coefficiencts? How big is a p-value
+summary(FitLm2)
+```
+#N=beta0+beta1OZ+beta2CO
+# oz has effect on N so it is statistically significant but how important is it?
+
+```{r}
+par(mfrow=c(2,2))
+plot(FitLm2)
+par(mfrow=c(1,1))
+```
+
+```{r}
+#install.packages("boot")
+rsq <- function(formula, data, indices) {
+ d <- data[indices,] # allows boot to select sample 
+ fit <- lm(formula, data=d)
+ return(summary(fit)$r.square)
+}
+
+# bootstrapping with 1000 replications 
+results_r2 <- boot(data=df_wd_train, statistic=rsq, 
+     R=100, formula= N ~ oz + co)
+
+results_r2
+
+cf <- function(formula, data, indices) {
+ d <- data[indices,] # allows boot to select sample 
+ fit <- lm(formula, data=d)
+ return(coef(fit))
+}
+
+
+results_cf <- boot(data=df_wd_train, statistic=cf, 
+     R=100, formula= N ~ oz + co)
+
+results_cf
+```
+
+```{r}
+FitLm2_1 <- lm(data = df_wd_train, N ~ oz + day_)
+summary(FitLm2_1)
+
+# How does it looks on the graph?
+testF_oz <- lm(data = df_wd_train, N ~ oz)
+
+plot(N ~ oz, data = df_wd_train)
+abline(testF_oz)
+
+testF_oz_day <- lm(data = df_wd_train, N ~ oz + day_) # change in intersection coef
+
+plot(N ~ Oz, data = df_wd_train)
+abline(testF_oz)
+abline(testF_oz_day, col = "red") # # will print line for day_ = weekday
+abline(a = coef(testF_oz_day)[1] + coef(testF_oz_day)[3],
+      b = coef(testF_oz_day)[2], 
+      col = "green") # # will print line for day_ = workday
+
+
+# Interaction terms
+testF_oz_ozday <- lm(data = df_wd_train, N ~ oz + day_ + oz:day_) # changes intersection and slope given a value of categorical predictor
+testF_oz_ozday <- lm(data = df_wd_train, N ~ oz*day_) # an equivalent
+
+summary(testF_oz_ozday)
+
+plot(N ~ oz, data = df_wd_train)
+abline(testF_oz)
+abline(testF_oz_day, col = "red") # # will print line for day_ = weekday
+abline(a = coef(testF_oz_ozday)[1] + coef(testF_oz_ozday)[3],
+      b = coef(testF_oz_ozday)[2] + coef(testF_oz_ozday)[4], 
+      col = "green") # # will print line for day_ = workday
+```
+
+```{r}
+FitLm2_1_2 <- lm(data = df_wd_train, N ~ oz + co + pm + day_)
+summary(FitLm2_1_2)
+
+summary( lm(data = df_wd_train, N ~ ((oz + co + pm)*day_)) )
+```
+
+```{r}
+
+names(df_wd_train)
+#if you don't have variables you ignore you can use FitLm2_2 <- lm(data = df_wd_train, N ~ .)
+#summary(FitLm2_2)
+
+FitLm2_22 <- lm(data = df_wd_train, 
+                N ~ Oz*CO*PM*day_*Complaint_Type)
+summary(FitLm2_22)
+length(coef(FitLm2_22))  # 128 coefficients!!!!
+```
+
+```{r}
+
+#TASK Do polinomial regression (7 min)
+
+
+FitLm3 <- lm(data = df_wd_train, N ~ oz + co + I(oz^2) + 
+               I(co^2) + day_)
+summary(FitLm3)
+
+FitLm4 <- lm(data = df_wd_train, 
+             N ~ oz + co + I(oz^2) + I(co^2) +
+               I(oz^3) + I(co^3) + day_)
+summary(FitLm4)
+
+#equivalent to
+FitLm5 <- lm(data = df_wd_train, N ~ poly(oz, 3) + poly(co, 3) +
+               day_)
+summary(FitLm5)
+
+
+# what if even more?
+FitLm6 <- lm(data = df_wd_train, N ~ poly(Oz, 3)*poly(CO, 3)*poly(PM, 3)*day_*Complaint_Type)
+```
+
+
+```{r data_for_rfe}  
+#recursive feature extraction
+#read description at
+##http://topepo.github.io/caret/rfe.html
+
+#prepare data (do this on train data)
+head(df_wd_train)
+data_1_train <- df_wd_train %>% ungroup() %>% select(-Date)
+head(data_1_train)
+
+data_1_test <- df_wd_test %>% ungroup() %>% select(-Date)
+
+# create interaction term inside df. 
+#Create dummy variables at the same time
+dv <- dummyVars(~ day_ + oz, data = data_1_train)
+dv
+predict(dv, data_1_train) %>% head()
+
+# we can use the same sintax as before, but let us use only 2-var. interactions. For instance if we use Oz*CO*day_, we get Oz:CO:day_workday. We don't want this now
+
+dv <- dummyVars(~ (oz+co+day_)^2, data = data_1_train)
+predict(dv, data_1_train) %>% head()
+
+# all predictors
+names(data_1_train)
+# before creating dummies, check if some variables should be removed as zero var predictors
+
+
+########## Near zero var  
+# this should be done only for not categorical. 
+# Do this before creating dummies
+nzv <- nearZeroVar(data_1_train)
+nzv # nothing to remove
+#data_1_train <- data_1_train[, -nzv]
+#data_1_test <- data_1_test[, -nzv]
+
+dv <- dummyVars(~ (oz+co+pm+day_+Complaint_Type)^2, 
+                data = data_1_train)
+predict(dv, data_1_train) %>% dim  # 62 predictors
+data_62_train <- data.frame( predict(dv, data_1_train) )
+
+names(data_62_train)
+
+data_62_test <- data.frame( predict(dv, data_1_test) )
+```
+
+* either from ISLR book
+* or use caret for backward selection with cross validation.
+
+
+```{r preprocessing}
+#http://topepo.github.io/caret/preprocess.html
+
+########## Correlated
+highlyCorDescr  <- findCorrelation(cor(data_62_train), 
+                                   cutoff = .7, verbose = TRUE)
+highlyCorDescr 
+data_62_train <- data_62_train[,-highlyCorDescr]
+data_62_test <- data_62_test[,-highlyCorDescr]
+
+######### Linearly dependent
+comboInfo <- findLinearCombos(data_62_train)
+comboInfo
+data_62_train <- data_62_train[, -comboInfo$remove]
+dim(data_62_train)
+
+data_62_test <- data_62_test[, -comboInfo$remove]
+
+######### We do not cover here Centering and Scaling, Imputation, Transforming Predictors. Read about this on caret page
+```
+
+We did not cover here Centering and Scaling, Imputation, Transforming Predictors.
+Please refer to [caret preprocessing](http://topepo.github.io/caret/preprocess.html)
+
+
+```{r doing_rfe}
+
+#test the following 
+subsets <- c(1:5, 10, 15, 20)
+#The simulation will fit models with subset sizes of 25, 20, 15, 10, 5, 4, 3, 2, 1.
+
+set.seed(10)
+ctrl <- rfeControl(functions = lmFuncs,
+                   method = "cv",
+                   number = 10,
+                   repeats = 5,
+                   verbose = TRUE)
+
+lmProfile <- rfe(x = data_62_train, y = data_1_train$N,
+                 sizes = subsets,
+                 rfeControl = ctrl)
+
+lmProfile
+predictors(lmProfile)
+#plot
+trellis.par.set(caretTheme())
+plot(lmProfile, type = c("g", "o"))
+
+# Now we can use only chosen predictors to do lm
+
+train_data <- cbind(data_62_train, data_1_train$N)
+names(train_data)[ncol(train_data)] <- "N" 
+Fit_test <- lm(N ~ ., data = train_data)
+summary(Fit_test)
+```
+
+Caret website:
+
+* [overview](http://topepo.github.io/caret/featureselection.html)
+* [rfe](http://topepo.github.io/caret/rfe.html)
+* [GA](http://topepo.github.io/caret/GA.html)
+* [SA](http://topepo.github.io/caret/SA.html)
+
+```{r enet}
+# Let us take data with correlated predictors
+
+dv <- dummyVars(~ (Oz+CO+PM+day_+Complaint_Type)^2, 
+                data = data_1_train)
+predict(dv, data_1_train) %>% dim  # 62 predictors
+data_cor_62_train <- data.frame( predict(dv, data_1_train) )
+
+data_cor_62_test <- data.frame( predict(dv, data_1_test) )
+
+
+names(data_cor_62_train)
+
+
+enetGrid <- expand.grid(.alpha = seq(0, 1, 0.05), #Aplha between 0 (ridge) to 1 (lasso).
+                        .lambda = seq(0, 10, by = 1))
+
+########################################## training model
+ctrl <- trainControl(method = "cv", number = 10,
+                     verboseIter = T)
+set.seed(1)
+enetTune <- train(data_1_train$N ~ ., data = data_cor_62_train,   
+                  method = "glmnet", 
+                  tuneGrid = enetGrid,
+                  trControl = ctrl)
+
+enetTune
+enetTune$bestTune
+# in enetTune table find R2 corresponding to these values
+# it is 0.2798806
+# correlation 0.5290374
+summary(enetTune$finalModel)
+
+plot(enetTune)
+
+varImp(enetTune)
+```
+
+DO the final check on Test data.
+
+```{r}
+test_data <- cbind(data_cor_62_test, data_1_test$N)
+names(test_data)[ncol(test_data)] <- "N" 
+
+prediction <- predict(enetTune, test_data)
+RMSE(pred = prediction, obs = test_data$N) 
+# which is little better than rfe obtained model 
+```
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
